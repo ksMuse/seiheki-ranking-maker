@@ -616,7 +616,7 @@ body[data-stage="4"]{--accent:#1d63c9}
 <details class="profile" id="hidden-pref-sec">
 <summary id="hp-h">隠れた好み候補</summary>
 <div class="fold-body">
-<p class="sub" style="margin-bottom:10px">結果には出なかったが、好みのベクトルに近いタグです。</p>
+<p class="sub" style="margin-bottom:10px">結果には出なかったが、あなたの強いカテゴリの中で好みのベクトルに近いタグです。</p>
 <div id="hidden-pref-body"><p class="empty-note">結果を出すと表示されます。</p></div>
 </div>
 </details>
@@ -2983,6 +2983,37 @@ function fmt(en){ return {title:en.w.title, site:en.w.siteName, sim:Math.round(e
 return { near:scored.slice(0,30).map(fmt), far:scored.slice(-10).reverse().map(fmt), scored:scored };
 }catch(e){ return null; }
 }
+/* 隠れた好み候補（方式1b）: 強いカテゴリの判定
+   強いカテゴリ = 統合結果の上位20件（合成ベクトルの算出元と同じ範囲）が
+   属するカテゴリの集合。候補タグは、この集合にカテゴリが含まれることを
+   必須条件とし、上位に全く現れないカテゴリのタグは類似度が高くても
+   候補にしない（例: 上位に無い「汚い系・体液」が類似度だけで並ぶ不具合）。
+   項目が複数カテゴリに跨る場合（第1段階の .c、第2段階の .cats／members 等）は
+   全て数える。先頭1件だけを返す effCatName では本来強いカテゴリを
+   取りこぼすため、ここでは全カテゴリを列挙する。 */
+function allCatNamesOf(it){
+var out=[], seen={};
+function add(nm){ if(nm && !seen[nm]){ seen[nm]=1; out.push(nm); } }
+if(!it) return out;
+if(it.cat) add(it.cat);
+(it.c||[]).forEach(add);
+(it.cats||[]).forEach(function(cid){ CATEGORIES.forEach(function(cc){ if(cc.id===cid) add(cc.name); }); });
+if(it.catId){ CATEGORIES.forEach(function(cc){ if(cc.id===it.catId) add(cc.name); }); }
+var b = it.baseName? BASE_BY_NAME[it.baseName] : ((it.name && BASE_BY_NAME[it.name])? BASE_BY_NAME[it.name] : null);
+if(b) add(b.cat);
+if(it.base && BASE_BY_NAME[it.base]) add(BASE_BY_NAME[it.base].cat);
+(it.members||[]).forEach(function(m){ var bb=BASE_BY_NAME[m]; if(bb) add(bb.cat); });
+return out;
+}
+function strongCatSetOf(integ){
+var set={}, list=[];
+function collectFrom(items){ items.forEach(function(en){ allCatNamesOf(en.item).forEach(function(cn){ if(!set[cn]){ set[cn]=1; list.push(cn); } }); }); }
+if(integ && integ.flat && integ.flat.length){
+collectFrom(integ.flat.slice(0,20));
+if(!list.length) collectFrom(integ.flat);
+}
+return { set:set, list:list };
+}
 /* プロフィール詳細: 強いカテゴリ／弱い領域／隠れた好み候補／二面性／好みキーワード */
 function collectAnalysis(integ, wm){
 var out={strongCats:[], weakCats:[], hiddenPrefs:[], duality:null, keywords:[], tieGroups:[], profileText:S.profileText||""};
@@ -3011,7 +3042,10 @@ var excl={};
 function mark(it){ if(!it) return; if(it.baseName) excl[it.baseName]=1; if(it.name && BASE_BY_NAME[it.name]) excl[it.name]=1; if(it.base && BASE_BY_NAME[it.base]) excl[it.base]=1; (it.members||[]).forEach(function(m){ excl[m]=1; }); }
 integ.flat.forEach(function(en){ mark(en.item); });
 (S.rankingAll||[]).forEach(mark);
-var scored=ALL_TAGS.filter(function(t){ return !excl[t.name]; }).map(function(t){ return {t:t, sim:cosSim(comp.vec, t.vec)}; });
+/* 方式1b: 候補は強いカテゴリ（統合結果 上位20件が属するカテゴリ）と
+   重なるタグに限る。強いカテゴリが判定できない場合のみ無条件にする。 */
+var strongHp=strongCatSetOf(integ);
+var scored=ALL_TAGS.filter(function(t){ return !excl[t.name] && (!strongHp.list.length || strongHp.set[t.cat]); }).map(function(t){ return {t:t, sim:cosSim(comp.vec, t.vec)}; });
 scored.sort(function(a,b){ if(b.sim!==a.sim) return b.sim-a.sim; return a.t.name<b.t.name? -1:1; });
 out.hiddenPrefs=scored.slice(0,15).map(function(en){ return {name:en.t.name, cat:en.t.cat, sim:Math.round(en.sim*1000)/1000, rarity:en.t.rarity, rarityLabel:en.t.rarityLabel}; });
 }
@@ -4576,10 +4610,15 @@ if(it.base && BASE_BY_NAME[it.base]) excl[it.base]=1;
 }
 if(integ && integ.flat) integ.flat.forEach(function(en){ mark(en.item); });
 (S.rankingAll||[]).forEach(mark);
-var scored = ALL_TAGS.filter(function(t){ return !excl[t.name]; }).map(function(t){ return { t:t, sim:cosSim(comp.vec, t.vec) }; });
+/* 方式1b: 候補は強いカテゴリ（統合結果 上位20件が属するカテゴリ）と
+   重なるタグに限る。上位に全く現れないカテゴリのタグは、類似度が
+   高くても候補に出さない。強いカテゴリが判定できない場合のみ無条件。 */
+var strongHp = strongCatSetOf(integ);
+var unrankedCount = ALL_TAGS.filter(function(t){ return !excl[t.name]; }).length;
+var scored = ALL_TAGS.filter(function(t){ return !excl[t.name] && (!strongHp.list.length || strongHp.set[t.cat]); }).map(function(t){ return { t:t, sim:cosSim(comp.vec, t.vec) }; });
 scored.sort(function(a,b){ if(b.sim!==a.sim) return b.sim-a.sim; return a.t.name<b.t.name? -1 : (a.t.name>b.t.name? 1:0); });
 var top15 = scored.slice(0,15);
-if(!top15.length){ body.innerHTML='<p class="empty-note">候補はありませんでした。</p>'; return; }
+if(!top15.length){ body.innerHTML='<p class="empty-note">強いカテゴリの中に候補はありませんでした。</p>'; return; }
 var userTopNames = [];
 if(integ && integ.flat) integ.flat.slice(0,12).forEach(function(en2){ var nm = en2.item && (en2.item.baseName || (BASE_BY_NAME[en2.item.name]? en2.item.name : null)); if(nm && userTopNames.indexOf(nm)<0) userTopNames.push(nm); });
 var html = '<ol class="rank-list" style="margin-top:0">';
@@ -4591,7 +4630,7 @@ var why = (bestP && bestP.count>=3)? '<span class="rare-line">あなたの上位
 html += '<li><span class="no">'+(i+1)+'</span><span class="nm">'+escHTML(t.name)+'<span class="rare-line">'+escHTML(t.cat)+' ・ 希少度 <b>'+escHTML(t.rarityLabel)+'</b>（'+t.rarity+'/100）</span>'+why+'</span><span class="wm-sim">'+Math.round(en.sim*100)+'%</span></li>';
 });
 html += '</ol>';
-html += '<p class="wm-note">全'+ALL_TAGS.length+'タグのうち、統合結果にランクインしたタグを除いた '+(ALL_TAGS.length - Object.keys(excl).filter(function(k){ return BASE_BY_NAME[k]; }).length)+'件から、合成ベクトルとのコサイン類似度が高い順に表示しています。「一緒に付くことが多いタグです」の根拠は、DLsite実作品の全付与タグから集計した共起データ（追加収集10）です。</p>';
+html += '<p class="wm-note">全'+ALL_TAGS.length+'タグのうち、統合結果にランクインしたタグを除いた '+unrankedCount+'件から、まず統合結果の上位20件が属するカテゴリ（強いカテゴリ'+(strongHp.list.length? '：'+strongHp.list.map(function(c){ return escHTML(c); }).join('、') : '')+'）と重なる '+scored.length+'件に絞り、その中で合成ベクトルとのコサイン類似度が高い順に表示しています。上位に現れないカテゴリのタグは、類似度が高くても表示しません。「一緒に付くことが多いタグです」の根拠は、DLsite実作品の全付与タグから集計した共起データ（追加収集10）です。</p>';
 body.innerHTML = html;
 }
 /* ---------- 3. 好みの二面性チェック ---------- */
